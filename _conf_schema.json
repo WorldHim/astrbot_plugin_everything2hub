@@ -1,0 +1,132 @@
+{
+  "repo": {
+    "description": "图库仓库",
+    "type": "string",
+    "default": "",
+    "hint": "必填，owner/name 形式。指向任意把图片放在仓库里的 GitHub 仓库。"
+  },
+  "branch": {
+    "description": "分支 / 标签",
+    "type": "string",
+    "default": "main",
+    "hint": "git clone 与 git pull 使用的分支名，也支持 tag。"
+  },
+  "repo_url": {
+    "description": "仓库克隆地址（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "留空则用 https://github.com/<repo>.git。填了就用这个地址克隆，可用于镜像或自建仓库，例如 https://gitcode.com/xxx/yyy.git。"
+  },
+  "git_path": {
+    "description": "git 可执行文件",
+    "type": "string",
+    "default": "git",
+    "hint": "AstrBot 运行环境里 git 不在 PATH 时，填绝对路径，如 /usr/bin/git。"
+  },
+  "clone_depth": {
+    "description": "克隆深度",
+    "type": "int",
+    "default": 1,
+    "hint": "1 表示浅克隆，只拉最新一次提交，最省流量最快；设为 0 表示完整克隆（能查历史，但慢很多）。"
+  },
+  "pull_interval_seconds": {
+    "description": "自动 git pull 间隔（秒）",
+    "type": "int",
+    "default": 300,
+    "hint": "两次抽图之间至少隔这么久才去 pull 一次，避免每条消息都访问 GitHub。设为 0 表示每次都 pull。"
+  },
+  "git_timeout_seconds": {
+    "description": "git 超时（秒）",
+    "type": "int",
+    "default": 120,
+    "hint": "单次 clone / pull 的最长等待时间。"
+  },
+  "send_mode": {
+    "description": "发送方式",
+    "type": "string",
+    "default": "auto",
+    "options": [
+      "auto",
+      "url"
+    ],
+    "hint": "auto：直接发送本地仓库里的图片文件（推荐，qq_official 也能正常上传）；url：改发 jsDelivr 直链，需要服务器能访问 CDN。"
+  },
+  "cdn": {
+    "description": "jsDelivr 节点",
+    "type": "string",
+    "default": "cdn.jsdelivr.net",
+    "options": [
+      "cdn.jsdelivr.net",
+      "fastly.jsdelivr.net",
+      "gcore.jsdelivr.net",
+      "testingcf.jsdelivr.net"
+    ],
+    "hint": "仅在 send_mode=url 或本地文件缺失时使用。"
+  },
+  "include_dirs": {
+    "description": "只抽取这些目录",
+    "type": "list",
+    "default": [],
+    "hint": "填仓库第一层的目录名，留空表示整仓随机。可填多个。"
+  },
+  "exclude_dirs": {
+    "description": "排除这些目录",
+    "type": "list",
+    "default": [],
+    "hint": "目录匹配的是仓库第一层路径，留空表示不排除。"
+  },
+  "keyword_include": {
+    "description": "路径/文件名必含关键字",
+    "type": "list",
+    "default": [],
+    "hint": "任一命中即可，不区分大小写。留空表示不限制。"
+  },
+  "keyword_exclude": {
+    "description": "路径/文件名排除关键字",
+    "type": "list",
+    "default": [],
+    "hint": "任一命中就跳过，不区分大小写。"
+  },
+  "caption_template": {
+    "description": "图片附带的文字",
+    "type": "text",
+    "default": "",
+    "hint": "支持 {name} {path} {url} {repo} {branch} {commit} 占位符，留空表示只发图。qq_official 建议留空，避免文字和图挤在一条消息里。"
+  },
+  "cooldown_seconds": {
+    "description": "冷却时间（秒）",
+    "type": "int",
+    "default": 10,
+    "hint": "同一会话内两次抽图的最小间隔，设为 0 表示不限制。"
+  },
+  "recent_limit": {
+    "description": "避免重复的张数",
+    "type": "int",
+    "default": 30,
+    "hint": "记住最近发过的 N 张，随机时优先避开；设为 0 表示完全不避重。"
+  },
+  "timeout_seconds": {
+    "description": "下载超时（秒）",
+    "type": "int",
+    "default": 20,
+    "hint": "本地文件缺失、回退下载图片时的超时。"
+  },
+  "max_download_mb": {
+    "description": "单张图片大小上限（MB）",
+    "type": "float",
+    "default": 8,
+    "hint": "回退下载时超过上限就改为发送直链。"
+  },
+  "poke_enabled": {
+    "description": "戳一戳触发回声洞",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，群里或私聊戳一戳机器人也会随机抽一张图（仅 aiocqhttp 平台支持；qq_official 没有戳一戳事件）。"
+  },
+  "image_cache_limit": {
+    "description": "回退下载缓存上限（张）",
+    "type": "int",
+    "default": 200,
+    "hint": "回退下载的图片缓存在 data/plugin_data 下，超过这个数量会删除最旧的。设为 0 表示不限制。"
+  }
+}
