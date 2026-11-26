@@ -23,6 +23,18 @@
     "default": "git",
     "hint": "AstrBot 运行环境里 git 不在 PATH 时，填绝对路径，如 /usr/bin/git。"
   },
+  "git_token": {
+    "description": "私有仓库访问令牌（token）",
+    "type": "string",
+    "default": "",
+    "hint": "留空表示公开仓库。填 GitHub fine-grained PAT（权限只勾 Contents: Read）即可访问私有图库；也可以改用环境变量 E2H_GIT_TOKEN，避免把 token 写进配置文件。注意：插件配置不加密，token 在此处是明文存储。"
+  },
+  "git_token_user": {
+    "description": "令牌对应的用户名",
+    "type": "string",
+    "default": "x-access-token",
+    "hint": "GitHub 保持默认即可；GitLab 用 oauth2。鉴权头按 base64(用户名:token) 生成。"
+  },
   "clone_depth": {
     "description": "克隆深度",
     "type": "int",

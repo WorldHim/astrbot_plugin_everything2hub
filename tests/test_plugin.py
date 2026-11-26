@@ -433,3 +433,209 @@ def test_terminate_closes_session(plugin_module, monkeypatch, tmp_path):
     closed, session = asyncio.run(go())
     assert closed is True
     assert session is None
+
+
+def test_token_from_config_reaches_git_repo(plugin_module, monkeypatch, tmp_path):
+    plugin = make_plugin(plugin_module, monkeypatch, tmp_path, git_token="s3cr3t")
+    repo = plugin._git_repo()
+    assert repo.has_token is True
+    assert plugin._private_mode() is True
+
+
+def test_token_from_env_when_config_empty(plugin_module, monkeypatch, tmp_path):
+    monkeypatch.setenv(plugin_module.GIT_TOKEN_ENV, "from-env")
+    plugin = make_plugin(plugin_module, monkeypatch, tmp_path, git_token="")
+    assert plugin._git_token() == "from-env"
+    assert plugin._git_repo().has_token is True
+
+
+def test_token_user_default_and_override(plugin_module, monkeypatch, tmp_path):
+    plugin = make_plugin(plugin_module, monkeypatch, tmp_path, git_token="t")
+    assert plugin._git_repo().token_user == "x-access-token"
+    plugin2 = make_plugin(
+        plugin_module, monkeypatch, tmp_path, git_token="t", git_token_user="oauth2"
+    )
+    assert plugin2._git_repo().token_user == "oauth2"
+
+
+def test_no_token_keeps_public_mode(plugin_module, monkeypatch, tmp_path):
+    monkeypatch.delenv(plugin_module.GIT_TOKEN_ENV, raising=False)
+    plugin = make_plugin(plugin_module, monkeypatch, tmp_path, git_token="")
+    assert plugin._private_mode() is False
+    assert plugin._git_repo().has_token is False
+
+
+def test_private_mode_skips_cdn(plugin_module, monkeypatch, tmp_path):
+    plugin = make_plugin(
+        plugin_module, monkeypatch, tmp_path, git_token="t", send_mode="url"
+    )
+    assert plugin._send_cdn() is False
+
+
+def test_private_mode_never_builds_cdn_url(plugin_module, monkeypatch, tmp_path):
+    plugin = make_plugin(plugin_module, monkeypatch, tmp_path, git_token="t")
+    assert plugin._cdn_url(plugin_module.HubFile("/a.png", "1")) == ""
+
+
+def test_private_mode_uses_api_download(plugin_module, monkeypatch, tmp_path):
+    upstream = make_upstream(tmp_path / "up")
+    plugin = make_plugin(
+        plugin_module, monkeypatch, tmp_path, upstream=upstream, git_token="t"
+    )
+    run_async(plugin._sync())
+    for f in plugin._files:
+        target = plugin_module.local_image_path(plugin.repo_dir, f.path)
+        if target.is_file():
+            target.unlink()
+
+    seen = []
+
+    async def fake_download(url, **kwargs):
+        seen.append(url)
+        return tmp_path / "dl.png"
+
+    plugin._download = fake_download
+    out = run(plugin, FakeEvent("cave"))
+    assert seen and seen[0].startswith(
+        "https://api.github.com/repos/someone/gallery/contents/"
+    )
+    assert plugin._head_sha in seen[0]
+    assert out[0][1][0].file.startswith("file://")
+
+
+def test_private_mode_falls_back_to_plain_text_not_jsdelivr(
+    plugin_module, monkeypatch, tmp_path
+):
+    upstream = make_upstream(tmp_path / "up")
+    plugin = make_plugin(
+        plugin_module, monkeypatch, tmp_path, upstream=upstream, git_token="t"
+    )
+    run_async(plugin._sync())
+    for f in plugin._files:
+        target = plugin_module.local_image_path(plugin.repo_dir, f.path)
+        if target.is_file():
+            target.unlink()
+
+    async def no_download(url, **kwargs):
+        return None
+
+    plugin._download = no_download
+    out = run(plugin, FakeEvent("cave"))
+    assert out[0][0] == "plain"
+    assert "jsdelivr" not in repr(out)
+
+
+def test_private_mode_caption_uses_blob_url(plugin_module, monkeypatch, tmp_path):
+    plugin = make_plugin(
+        plugin_module,
+        monkeypatch,
+        tmp_path,
+        git_token="t",
+        caption_template="{url}",
+    )
+    file = plugin_module.HubFile("/a b/c.png", "1")
+    plugin._head_sha = "abc123"
+    assert plugin._blob_url(file.path) == (
+        "https://github.com/someone/gallery/blob/abc123/a%20b/c.png"
+    )
+    assert plugin._caption(file, "") == plugin._blob_url(file.path)
+
+
+def test_public_mode_still_uses_cdn(plugin_module, monkeypatch, tmp_path):
+    upstream = make_upstream(tmp_path / "up")
+    plugin = make_plugin(plugin_module, monkeypatch, tmp_path, upstream=upstream)
+    run_async(plugin._sync())
+    assert plugin._cdn_url(plugin._files[0]).startswith("https://cdn.jsdelivr.net/gh/")
+    assert plugin._blob_url(plugin._files[0].path) == ""
+
+
+def test_api_download_sends_auth_header(plugin_module, monkeypatch, tmp_path):
+    plugin = make_plugin(plugin_module, monkeypatch, tmp_path, git_token="s3cr3t")
+    plugin._head_sha = "abc123"
+    url = plugin._api_url("/a.png")
+    headers = plugin._download_headers(url)
+    assert headers["Authorization"] == "Bearer s3cr3t"
+    assert headers["Accept"] == "application/vnd.github.raw"
+    assert plugin._download_headers("https://cdn.jsdelivr.net/gh/x") == {}
+
+
+def test_api_content_type_is_accepted(plugin_module, monkeypatch, tmp_path):
+    """GitHub Contents API 的 Content-Type 是 application/vnd.github.raw，
+    不是 image/*，不能被当成「非图片内容」拒掉。"""
+    plugin = make_plugin(plugin_module, monkeypatch, tmp_path, git_token="t")
+    plugin._head_sha = "abc123"
+    assert plugin._is_image_response(
+        "application/vnd.github.raw; charset=utf-8", plugin._api_url("/a.png")
+    )
+
+
+def test_cdn_non_image_content_type_still_rejected(plugin_module, monkeypatch, tmp_path):
+    plugin = make_plugin(plugin_module, monkeypatch, tmp_path, git_token="t")
+    plugin._head_sha = "abc123"
+    assert not plugin._is_image_response(
+        "text/html", plugin._api_url("/a.png")
+    )
+    assert not plugin._is_image_response(
+        "application/vnd.github.raw", "https://cdn.jsdelivr.net/gh/x/a.png"
+    )
+
+
+def test_git_error_text_never_contains_token(plugin_module, monkeypatch, tmp_path):
+    """401 之类的报错文本里不能回显 token。"""
+    plugin = make_plugin(plugin_module, monkeypatch, tmp_path, git_token="sup3rs3cret")
+    repo = plugin._git_repo()
+    err = repo._detail(128, "fatal: Authentication failed for 'https://github.com/a/b'", "克隆图库仓库")
+    assert "sup3rs3cret" not in str(err)
+    assert "sup3rs3cret" not in repr(repo._env())
+
+
+def test_token_not_in_url_or_config_file(plugin_module, monkeypatch, tmp_path):
+    """token 只能走环境变量，不能进 URL，也不能被 git 写进 .git/config。"""
+    plugin = make_plugin(
+        plugin_module,
+        monkeypatch,
+        tmp_path,
+        git_token="sup3rs3cret",
+        repo_url="https://example.com/owner/repo.git",
+    )
+    repo = plugin._git_repo()
+    assert "sup3rs3cret" not in repo.url
+    assert repo._env()["GIT_CONFIG_VALUE_0"].count("Authorization") == 1
+    assert (
+        repo._env()["GIT_CONFIG_KEY_0"]
+        == "http.https://example.com/.extraheader"
+    )
+
+
+def test_local_upstream_skips_token_injection(plugin_module, monkeypatch, tmp_path):
+    """本地路径上游不需要鉴权，注入反而会污染 git 环境。"""
+    upstream = make_upstream(tmp_path / "up")
+    plugin = make_plugin(
+        plugin_module, monkeypatch, tmp_path, upstream=upstream, git_token="sup3rs3cret"
+    )
+    repo = plugin._git_repo()
+    assert repo._env().get("GIT_CONFIG_VALUE_0") is None
+
+
+def test_api_and_blob_urls_require_github_host(plugin_module, monkeypatch, tmp_path):
+    """镜像不是 GitHub 时不能把 token 发给 api.github.com。"""
+    plugin = make_plugin(
+        plugin_module,
+        monkeypatch,
+        tmp_path,
+        git_token="t",
+        repo_url="https://gitcode.com/owner/gallery.git",
+    )
+    assert plugin._is_github_source() is False
+    assert plugin._api_url("/a.png") == ""
+    assert plugin._blob_url("/a.png") == ""
+
+
+def test_api_url_works_for_default_github_source(plugin_module, monkeypatch, tmp_path):
+    plugin = make_plugin(
+        plugin_module, monkeypatch, tmp_path, git_token="t", repo_url=""
+    )
+    assert plugin._is_github_source() is True
+    assert plugin._api_url("/a.png").startswith(
+        "https://api.github.com/repos/someone/gallery/contents/a.png"
+    )

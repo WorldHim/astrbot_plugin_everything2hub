@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 from astrbot.api import logger
@@ -17,6 +19,7 @@ from astrbot.api.star import Context, Star, StarTools
 
 from .git_client import (
     CDN_HOSTS,
+    GIT_TOKEN_ENV,
     GitError,
     GitRepo,
     HubFile,
@@ -94,6 +97,22 @@ class Everything2HubPlugin(Star):
     def _timeout(self) -> aiohttp.ClientTimeout:
         return aiohttp.ClientTimeout(total=float(self._cfg("timeout_seconds", 20)))
 
+    def _git_token(self) -> str:
+        """访问私有仓库用的 token：配置项优先，环境变量兜底。"""
+        return str(self._cfg("git_token", "") or "").strip() or str(
+            os.environ.get(GIT_TOKEN_ENV, "") or ""
+        ).strip()
+
+    def _git_token_user(self) -> str:
+        return (
+            str(self._cfg("git_token_user", "x-access-token") or "").strip()
+            or "x-access-token"
+        )
+
+    def _private_mode(self) -> bool:
+        """配了 token 就按私有仓库处理：CDN 取不到内容，只能本地或 API。"""
+        return bool(self._git_token())
+
     def _git_repo(self) -> GitRepo:
         return GitRepo(
             self.repo_dir,
@@ -103,9 +122,14 @@ class Everything2HubPlugin(Star):
             depth=int(self._cfg("clone_depth", 1) or 0),
             timeout=float(self._cfg("git_timeout_seconds", 120)),
             url_override=str(self._cfg("repo_url", "") or ""),
+            token=self._git_token(),
+            token_user=self._git_token_user(),
         )
 
     def _send_cdn(self) -> bool:
+        """私有仓库走不了公共 CDN，只能本地文件或 API 下载。"""
+        if self._private_mode():
+            return False
         return str(self._cfg("send_mode", "auto")).lower() == "url"
 
     async def _sync(self, force: bool = False) -> None:
@@ -201,8 +225,78 @@ class Everything2HubPlugin(Star):
             )
         return self._session
 
+    def _ref(self) -> str:
+        """API / blob 链接用的版本：优先 commit，退化为分支。"""
+        return self._head_sha or self._branch()
+
+    def _is_github_source(self) -> bool:
+        """当前上游是不是 github.com；API 取图只对它成立。"""
+        url = str(self._cfg("repo_url", "") or "").strip()
+        if not url:
+            return True  # 没填 repo_url 时走默认的 https://github.com/<repo>.git
+        host = urlsplit(url).netloc.lower()
+        return host in {"", "github.com", "www.github.com"}
+
+    def _api_url(self, path: str) -> str:
+        """GitHub Contents API 地址；私有仓库靠它取图。"""
+        repo = self._repo()
+        if not repo or not self._private_mode() or not self._is_github_source():
+            return ""
+        quoted = "/".join(
+            quote(seg, safe="") for seg in str(path).strip("/").split("/") if seg
+        )
+        if not quoted:
+            return ""
+        return (
+            f"https://api.github.com/repos/{repo}/contents/"
+            f"{quoted}?ref={quote(self._ref(), safe='')}"
+        )
+
+    def _blob_url(self, path: str) -> str:
+        """GitHub 网页地址，私有仓库拿它当 {url} 占位符的内容。"""
+        repo = self._repo()
+        if not repo or not self._private_mode() or not self._is_github_source():
+            return ""
+        quoted = "/".join(
+            quote(seg, safe="") for seg in str(path).strip("/").split("/") if seg
+        )
+        if not quoted:
+            return ""
+        return f"https://github.com/{repo}/blob/{quote(self._ref(), safe='')}/{quoted}"
+
+    def _download_headers(self, url: str) -> dict[str, str]:
+        """只有 GitHub API 请求才带 token，别顺手发给 CDN。"""
+        token = self._git_token()
+        if token and url.startswith("https://api.github.com/"):
+            return {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.raw",
+            }
+        return {}
+
+    def _is_image_response(self, ctype: str, url: str) -> bool:
+        """判断响应体是不是图片。
+
+        GitHub Contents API 用 application/vnd.github.raw 返回原始字节，
+        只要请求是发往 API 的，这种类型就是合法的图片内容。
+        """
+        ctype = (ctype or "").strip().lower()
+        if not ctype:
+            return True
+        if ctype.startswith("image/"):
+            return True
+        if url.startswith("https://api.github.com/"):
+            base = ctype.split(";", 1)[0].strip()
+            return base in {
+                "application/vnd.github.raw",
+                "application/octet-stream",
+            }
+        return False
+
     def _cdn_url(self, file: HubFile) -> str:
-        version = self._head_sha or self._branch()
+        if self._private_mode():
+            return ""
+        version = self._ref()
         try:
             return build_cdn_url(self._repo(), version, file.path, self._cdn_host())
         except ValueError:
@@ -222,10 +316,10 @@ class Everything2HubPlugin(Star):
         max_bytes = int(float(self._cfg("max_download_mb", 8)) * 1024 * 1024)
         session = await self._http()
         try:
-            async with session.get(url) as resp:
+            async with session.get(url, headers=self._download_headers(url)) as resp:
                 resp.raise_for_status()
                 ctype = (resp.headers.get("Content-Type") or "").lower()
-                if ctype and not ctype.startswith("image/"):
+                if not self._is_image_response(ctype, url):
                     logger.warning("图片链接返回了非图片内容（%s）：%s", ctype, url)
                     return None
                 chunks: list[bytes] = []
@@ -262,6 +356,8 @@ class Everything2HubPlugin(Star):
         template = str(self._cfg("caption_template", "") or "")
         if not template:
             return ""
+        if not url:
+            url = self._blob_url(file.path)
         try:
             return template.format(
                 name=file.name,
@@ -410,6 +506,9 @@ class Everything2HubPlugin(Star):
         if caption:
             chain.append(Plain(caption))
 
+        # 私有仓库没有公共 CDN 链接，取图只能靠本地克隆或 GitHub API。
+        download_url = cdn_url or self._api_url(chosen.path)
+
         sent_local = False
         if not self._send_cdn():
             path: Path | None = None
@@ -420,16 +519,24 @@ class Everything2HubPlugin(Star):
             except (OSError, ValueError) as exc:
                 logger.warning("读取本地图片失败：%s", exc)
             if path is None:
-                path = await self._download(cdn_url)
+                path = await self._download(download_url)
             if path is not None:
                 chain.append(Image.fromFileSystem(str(path)))
                 sent_local = True
 
         if not sent_local:
-            if not cdn_url:
+            if not download_url:
                 yield event.plain_result("图片发送失败，请稍后再试。")
                 return
-            chain.append(Image.fromURL(cdn_url))
+            if not self._private_mode():
+                chain.append(Image.fromURL(download_url))
+                sent_local = True
+
+        if not sent_local:
+            # 私有仓库既没有本地文件也下载失败：宁可不发，也不把死链丢给用户。
+            logger.warning("私有图库取图失败：%s", chosen.path)
+            yield event.plain_result("图片发送失败，请稍后再试。")
+            return
 
         self._last_sent[umo] = time.monotonic()
         self._recent[umo] = update_recent(

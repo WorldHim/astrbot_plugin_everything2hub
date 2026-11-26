@@ -2,7 +2,7 @@ name: astrbot_plugin_everything2hub
 display_name: 回声洞
 desc: 用 git 克隆/拉取图库仓库，随机抽一张图片发送，支持 aiocqhttp 与 qq_official。
 short_desc: 回声洞：从 git 图库随机抽一张图
-version: v1.0.0
+version: v1.1.0
 author: WorldHim
 repo: https://github.com/WorldHim/astrbot_plugin_everything2hub
 support_platforms:

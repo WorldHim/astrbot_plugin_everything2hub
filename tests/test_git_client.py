@@ -1,6 +1,7 @@
 """git_client 的单元测试：解析、过滤、随机、索引缓存，以及真实 git 交互。"""
 
 import json
+import os
 
 import pytest
 
@@ -216,3 +217,103 @@ async def test_gitrepo_head_empty_before_clone(git_client, tmp_path):
     assert await repo.head() == ""
     with pytest.raises(git_client.GitError):
         await repo.list_files()
+
+
+def test_auth_scope_keeps_scheme_and_host(git_client):
+    assert git_client.auth_scope("https://github.com/a/b.git") == "https://github.com/"
+    assert (
+        git_client.auth_scope("https://git.example.com:8443/a/b.git")
+        == "https://git.example.com:8443/"
+    )
+    assert git_client.auth_scope("http://10.0.0.5/a/b.git") == "http://10.0.0.5/"
+
+
+def test_auth_scope_rejects_non_http(git_client):
+    assert git_client.auth_scope("/tmp/upstream.git") == ""
+    assert git_client.auth_scope("file:///tmp/upstream.git") == ""
+    assert git_client.auth_scope("") == ""
+
+
+def test_token_env_builds_extraheader(git_client):
+    env = git_client.token_env(
+        "s3cr3t", "https://github.com/a/b.git", user="x-access-token"
+    )
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
+    assert (
+        env["GIT_CONFIG_VALUE_0"]
+        == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46czNjcjN0"
+    )
+
+
+def test_token_env_strips_whitespace(git_client):
+    env = git_client.token_env("  s3cr3t\n", "https://github.com/a/b.git")
+    assert env["GIT_CONFIG_VALUE_0"] == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46czNjcjN0"
+
+
+def test_token_env_empty_token_or_local_url_injects_nothing(git_client):
+    assert git_client.token_env("", "https://github.com/a/b.git") == {}
+    assert git_client.token_env("s3cr3t", "/tmp/upstream.git") == {}
+
+
+def test_token_env_extends_existing_config_count(git_client):
+    base = {
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_1": "x.y",
+        "GIT_CONFIG_VALUE_1": "z",
+    }
+    env = git_client.token_env("s3cr3t", "https://github.com/a/b.git", env=base)
+    assert env["GIT_CONFIG_COUNT"] == "3"
+    assert env["GIT_CONFIG_KEY_2"] == "http.https://github.com/.extraheader"
+
+
+def test_git_repo_env_includes_token(git_client, tmp_path):
+    repo = git_client.GitRepo(tmp_path / "r", "a/b", token="s3cr3t")
+    env = repo._env()
+    assert env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
+    assert repo.has_token is True
+
+
+def test_git_repo_env_without_token_is_untouched(git_client, tmp_path):
+    repo = git_client.GitRepo(tmp_path / "r", "a/b")
+    assert repo._env().get("GIT_CONFIG_VALUE_0") is None
+    assert repo.has_token is False
+
+
+def test_git_actually_reads_injected_header(git_client, tmp_path):
+    """真实跑一次 git，确认它确实认到了注入的 extraheader。"""
+    repo = git_client.GitRepo(
+        tmp_path / "r", "a/b", token="s3cr3t", token_user="x-access-token"
+    )
+    env = repo._env()
+    import subprocess as sp
+
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    out = sp.run(
+        ["git", "config", "--get-all", "http.https://github.com/.extraheader"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert out.returncode == 0
+    assert out.stdout.strip() == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46czNjcjN0"
+
+
+def test_git_sees_no_header_without_token(git_client, tmp_path):
+    repo = git_client.GitRepo(tmp_path / "r", "a/b")
+    env = repo._env()
+    import subprocess as sp
+
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    out = sp.run(
+        ["git", "config", "--get-all", "http.https://github.com/.extraheader"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert out.returncode != 0
+    assert "Authorization" not in out.stdout

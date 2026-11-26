@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import subprocess
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif")
 
@@ -28,6 +29,50 @@ GIT_ENV = {
     "GIT_LFS_SKIP_SMUDGE": "1",
     "GCM_INTERACTIVE": "never",
 }
+
+# 配置里没填 token 时，从这个环境变量兜底，便于部署时把凭据放在配置之外。
+GIT_TOKEN_ENV = "E2H_GIT_TOKEN"
+
+
+def auth_scope(url: str) -> str:
+    """把 clone 地址收敛成 git 的鉴权作用域（scheme://host/）。
+
+    只对 http(s) 生效：本地路径、file:// 上游不需要也不能带鉴权头。
+    """
+    parts = urlsplit((url or "").strip())
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return ""
+    return f"{parts.scheme}://{parts.netloc}/"
+
+
+def token_env(
+    token: str,
+    url: str,
+    *,
+    user: str = "x-access-token",
+    env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """构造把 token 注入成 HTTP 鉴权头的环境变量增量。
+
+    用 GIT_CONFIG_COUNT 而不是写 .git/config，token 不落盘；作用域限定到
+    scheme://host/，重定向或换镜像都带不走。
+    """
+    token = (token or "").strip()
+    scope = auth_scope(url)
+    if not token or not scope:
+        return {}
+    user = (user or "x-access-token").strip() or "x-access-token"
+    credentials = base64.b64encode(f"{user}:{token}".encode()).decode()
+    current = str((env or {}).get("GIT_CONFIG_COUNT") or "0")
+    try:
+        index = int(current)
+    except ValueError:
+        index = 0
+    return {
+        "GIT_CONFIG_COUNT": str(index + 1),
+        f"GIT_CONFIG_KEY_{index}": f"http.{scope}.extraheader",
+        f"GIT_CONFIG_VALUE_{index}": f"Authorization: Basic {credentials}",
+    }
 
 
 class GitError(RuntimeError):
@@ -271,6 +316,8 @@ class GitRepo:
         depth: int = 1,
         timeout: float = 120.0,
         url_override: str | None = None,
+        token: str | None = None,
+        token_user: str = "x-access-token",
     ) -> None:
         self.workdir = Path(workdir)
         self.repo = repo.strip().strip("/")
@@ -279,7 +326,13 @@ class GitRepo:
         self.depth = max(0, int(depth))
         self.timeout = max(1.0, float(timeout))
         self.url_override = (url_override or "").strip() or None
+        self.token = (token or "").strip()
+        self.token_user = (token_user or "x-access-token").strip() or "x-access-token"
         self._git: str | None = None
+
+    @property
+    def has_token(self) -> bool:
+        return bool(self.token)
 
     @property
     def git(self) -> str:
@@ -298,6 +351,7 @@ class GitRepo:
 
         env = dict(os.environ)
         env.update(GIT_ENV)
+        env.update(token_env(self.token, self.url, user=self.token_user, env=env))
         return env
 
     async def _run(

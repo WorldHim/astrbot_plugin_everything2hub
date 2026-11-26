@@ -44,6 +44,8 @@ AstrBot 运行环境里必须能执行 `git` 命令，并能访问 GitHub 或 `r
 | `branch` | string | `main` | clone / pull 使用的分支或 tag |
 | `repo_url` | string | 空 | 自定义克隆地址（镜像、私有仓库），留空则用 `https://github.com/<repo>.git` |
 | `git_path` | string | `git` | git 可执行文件，不在 PATH 时填绝对路径 |
+| `git_token` | string | 空 | 访问私有仓库的令牌；留空表示公开仓库，也可用环境变量 `E2H_GIT_TOKEN` 提供 |
+| `git_token_user` | string | `x-access-token` | 令牌对应的用户名，GitHub 用默认值，GitLab 填 `oauth2` |
 | `clone_depth` | int | `1` | 克隆深度；`1` 是浅克隆最省流量，`0` 表示完整克隆 |
 | `pull_interval_seconds` | int | `300` | 两次抽图之间至少隔这么久才 pull，`0` 表示每次都 pull |
 | `git_timeout_seconds` | int | `120` | 单次 clone / pull 的超时 |
@@ -86,7 +88,24 @@ data/plugin_data/astrbot_plugin_everything2hub/
 
 ## 换成别的图库
 
-任何把图片放在仓库里的 GitHub 仓库都能用：把 `repo` 改成 `owner/name`、`branch` 改成对应分支即可（私有仓库可以把 `repo_url` 指向带凭据的地址，或提前手动 clone 到 `data/plugin_data/astrbot_plugin_everything2hub/repo` —— 插件发现 `.git` 已存在就不会重新克隆）。
+任何把图片放在仓库里的 GitHub 仓库都能用：把 `repo` 改成 `owner/name`、`branch` 改成对应分支即可。
+
+## 私有仓库
+
+私有图库只要填一枚只读令牌就能用，推荐按下面的最小权限方式准备：
+
+1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens**，只勾选目标仓库的 **Contents: Read**。
+2. 把令牌填进 `git_token`。不想写在配置文件里的话，改成设置环境变量 `E2H_GIT_TOKEN`（配置项留空时插件会读它）。
+3. 如果图库在 GitLab，把 `git_token_user` 改成 `oauth2`。
+
+几点与实际行为相关的说明：
+
+- 令牌是通过 git 的 `http.<仓库域名>.extraheader` 在进程环境里注入的，**不会拼进 clone 地址，也不会被写进 `.git/config`**；作用域限定在目标域名，换镜像或跳转都带不走。
+- 插件配置本身不加密，`git_token` 在配置文件里是**明文**；如果在意这一点，用环境变量。
+- 私有仓库的内容 jsDelivr 取不到，所以启用令牌后插件会关掉直链模式：发图依赖本地克隆，本地文件缺失时改走 GitHub Contents API（带令牌）下载；`{url}` 占位符会变成 GitHub 网页地址。
+- 已经填了 `repo_url` 的镜像地址照旧生效，令牌会按那个地址的域名注入。
+
+也可以继续保持老办法：提前把仓库 clone 到 `data/plugin_data/astrbot_plugin_everything2hub/repo`，插件发现 `.git` 已存在就不会重新克隆。
 
 ## 开发
 
